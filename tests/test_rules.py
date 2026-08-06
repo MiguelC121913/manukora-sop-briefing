@@ -152,22 +152,39 @@ def test_non_bioactive_sku_has_no_m1_exclusion_note(rules_batch):
 
 
 # --- Rule 4: demand-decline tension flag ------------------------------------
+#
+# Criterion (revised — see rules.py's module docstring): is_overstocked AND
+# a declining-demand signal (stalling trend, or either channel's MoM
+# negative). No revenue ranking involved.
 
 
-def test_no_tension_flag_on_real_data_this_month(rules_batch):
-    """On this month's real mock data, the top-3-revenue SKUs (MGO 263+
-    250g, 514+ 250g, 263+ 500g) are all steady/accelerating with positive
-    channel MoM — so no tension flag fires. This is the correct outcome of
-    the rule, not a bug: it proves the top-3 filter is actually being
-    applied (MGO 100+ 250g is stalling with negative Amazon MoM, but ranks
-    #7 by revenue, outside the top 3, and is correctly NOT flagged).
+def test_tension_flag_real_data_flags_only_mgo_100(rules_batch):
+    """MGO 100+ 250g is overstocked (8.14 months cover with its inbound PO
+    vs. a 2-month target) and stalling (0.8% blended MoM, Amazon MoM
+    negative) — it fires under the revised criterion even though it ranks
+    #7 by revenue, which excluded it under the original top-3 gate. No
+    other SKU in this month's data satisfies both conditions.
     """
     flagged = [r.sku for r in rules_batch.recommendations if r.tension_flag is not None]
-    assert flagged == []
+    assert flagged == ["Manuka Honey MGO 100+ 250g"]
 
     mgo_100 = _rec(rules_batch, "Manuka Honey MGO 100+ 250g")
     assert mgo_100.metrics.trend == "stalling"
-    assert mgo_100.tension_flag is None  # not top-3 by revenue
+    assert mgo_100.metrics.is_overstocked is True
+    assert mgo_100.tension_flag == "high_revenue_declining_demand"
+
+
+def test_tension_flag_real_data_mgo_100_recommends_deferring_its_po(rules_batch):
+    """MGO 100+ 250g has 2,000 units already on order (from the CSV) — with
+    the tension flag set and it already overstocked, the rule must
+    recommend deferring/reducing that inbound PO rather than a fresh
+    reorder.
+    """
+    mgo_100 = _rec(rules_batch, "Manuka Honey MGO 100+ 250g")
+    assert mgo_100.recommended_action == "defer_or_reduce_inbound_po"
+    assert any("2000 units inbound" in note for note in mgo_100.notes)
+    assert mgo_100.final_reorder_quantity == 0
+    assert "Manuka Honey MGO 100+ 250g" not in {e["sku"] for e in rules_batch.priority_reorder_list}
 
 
 def _make_metrics(**overrides) -> SKUMetrics:
@@ -217,96 +234,106 @@ def _minimal_rules() -> dict:
     }
 
 
-def test_tension_flag_triggers_for_top3_revenue_stalling_sku():
-    high_rev_stalling = _make_metrics(
-        sku="Top Revenue Stalling", revenue_opportunity_monthly=100_000, trend="stalling",
-        shopify_mom_growth=0.01, amazon_mom_growth=0.01, reorder_quantity=500,
+def test_tension_flag_fires_regardless_of_revenue_rank_when_overstocked_and_stalling():
+    """The revised criterion has no revenue gate at all: a low-revenue SKU
+    that's overstocked and stalling must flag, and a much higher-revenue SKU
+    that's healthy must not — proving revenue rank no longer matters either
+    way.
+    """
+    low_revenue_tension = _make_metrics(
+        sku="Low Revenue Tension", revenue_opportunity_monthly=500, trend="stalling",
+        is_overstocked=True, shopify_mom_growth=0.01, amazon_mom_growth=0.01, reorder_quantity=500,
     )
-    other_top = [
-        _make_metrics(sku=f"Filler {i}", revenue_opportunity_monthly=50_000 - i, reorder_quantity=100)
-        for i in range(2)
-    ]
-    low_rev_stalling = _make_metrics(
-        sku="Low Revenue Stalling", revenue_opportunity_monthly=500, trend="stalling",
-        shopify_mom_growth=-0.05,
+    high_revenue_healthy = _make_metrics(
+        sku="High Revenue Healthy", revenue_opportunity_monthly=100_000, trend="accelerating",
+        is_overstocked=False,
     )
-    all_metrics = [high_rev_stalling, *other_top, low_rev_stalling]
+    all_metrics = [low_revenue_tension, high_revenue_healthy]
     records = [_make_record(sku=m.sku) for m in all_metrics]
-    rules = _minimal_rules()
 
-    batch = apply_business_rules(records, all_metrics, rules)
+    batch = apply_business_rules(records, all_metrics, _minimal_rules())
 
-    flagged = _rec(batch, "Top Revenue Stalling")
+    flagged = _rec(batch, "Low Revenue Tension")
     assert flagged.tension_flag == "high_revenue_declining_demand"
-    assert flagged.tension_supporting_figures["revenue_opportunity_monthly"] == 100_000
     assert flagged.tension_supporting_figures["trend"] == "stalling"
-
-    # Not in top 3 by revenue -> not flagged even though also stalling
-    not_flagged = _rec(batch, "Low Revenue Stalling")
-    assert not_flagged.tension_flag is None
-
-    # metrics.reorder_quantity untouched by the tension flag
+    assert flagged.tension_supporting_figures["is_overstocked"] is True
+    # metrics.reorder_quantity untouched by the tension flag...
     assert flagged.metrics.reorder_quantity == 500
     # ...but excluded from the actionable priority list
-    assert "Top Revenue Stalling" not in {e["sku"] for e in batch.priority_reorder_list}
+    assert "Low Revenue Tension" not in {e["sku"] for e in batch.priority_reorder_list}
+
+    assert _rec(batch, "High Revenue Healthy").tension_flag is None
 
 
 def test_tension_flag_triggers_on_negative_channel_mom_even_if_trend_not_stalling():
     m = _make_metrics(
-        sku="Negative Channel", revenue_opportunity_monthly=90_000,
-        trend="steady", shopify_mom_growth=-0.01, amazon_mom_growth=0.05,
+        sku="Negative Channel", trend="steady", is_overstocked=True,
+        shopify_mom_growth=-0.01, amazon_mom_growth=0.05,
     )
-    fillers = [_make_metrics(sku=f"Filler {i}", revenue_opportunity_monthly=80_000 - i) for i in range(2)]
-    all_metrics = [m, *fillers]
-    records = [_make_record(sku=x.sku) for x in all_metrics]
-    batch = apply_business_rules(records, all_metrics, _minimal_rules())
+    records = [_make_record(sku=m.sku)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
 
     assert _rec(batch, "Negative Channel").tension_flag == "high_revenue_declining_demand"
 
 
-def test_defer_or_reduce_inbound_po_when_tension_and_overstocked_and_po_pending():
+def test_tension_flag_not_triggered_when_stalling_but_not_overstocked():
+    """A declining-demand signal alone is not enough — metrics.trend already
+    surfaces "stalling" on its own; the tension flag specifically needs
+    capital tied up in excess inventory too.
+    """
+    m = _make_metrics(sku="Stalling Not Overstocked", trend="stalling", is_overstocked=False)
+    records = [_make_record(sku=m.sku)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
+
+    assert _rec(batch, "Stalling Not Overstocked").tension_flag is None
+
+
+def test_tension_flag_not_triggered_when_overstocked_but_healthy_trend():
+    """Overstock alone is not enough either — a SKU sitting on months of
+    cover with strong, healthy growth is a normal buffer, not a tension.
+    """
     m = _make_metrics(
-        sku="Tension Overstocked", revenue_opportunity_monthly=90_000,
-        trend="stalling", is_overstocked=True,
+        sku="Overstocked Healthy", trend="accelerating", is_overstocked=True,
+        shopify_mom_growth=0.05, amazon_mom_growth=0.05,
     )
-    fillers = [_make_metrics(sku=f"Filler {i}", revenue_opportunity_monthly=80_000 - i) for i in range(2)]
-    all_metrics = [m, *fillers]
-    records = [
-        _make_record(sku="Tension Overstocked", units_on_order=500),
-        *[_make_record(sku=x.sku) for x in fillers],
-    ]
-    batch = apply_business_rules(records, all_metrics, _minimal_rules())
+    records = [_make_record(sku=m.sku)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
+
+    assert _rec(batch, "Overstocked Healthy").tension_flag is None
+
+
+def test_defer_or_reduce_inbound_po_when_tension_and_overstocked_and_po_pending():
+    m = _make_metrics(sku="Tension Overstocked", trend="stalling", is_overstocked=True)
+    records = [_make_record(sku="Tension Overstocked", units_on_order=500)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
 
     r = _rec(batch, "Tension Overstocked")
+    assert r.tension_flag == "high_revenue_declining_demand"
     assert r.recommended_action == "defer_or_reduce_inbound_po"
 
 
-def test_no_defer_recommendation_when_tension_but_not_overstocked():
-    m = _make_metrics(
-        sku="Tension Not Overstocked", revenue_opportunity_monthly=90_000,
-        trend="stalling", is_overstocked=False,
-    )
-    fillers = [_make_metrics(sku=f"Filler {i}", revenue_opportunity_monthly=80_000 - i) for i in range(2)]
-    all_metrics = [m, *fillers]
-    records = [_make_record(sku=x.sku, units_on_order=500) for x in all_metrics]
-    batch = apply_business_rules(records, all_metrics, _minimal_rules())
+def test_no_tension_flag_and_no_defer_when_not_overstocked():
+    """Not overstocked means the tension flag never fires in the first
+    place (see test_tension_flag_not_triggered_when_stalling_but_not_
+    overstocked) — so naturally there's nothing to defer either.
+    """
+    m = _make_metrics(sku="Tension Not Overstocked", trend="stalling", is_overstocked=False)
+    records = [_make_record(sku="Tension Not Overstocked", units_on_order=500)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
 
     r = _rec(batch, "Tension Not Overstocked")
+    assert r.tension_flag is None
     assert r.recommended_action is None
 
 
 def test_no_defer_recommendation_when_tension_and_overstocked_but_no_po_pending():
-    m = _make_metrics(
-        sku="Tension No PO", revenue_opportunity_monthly=90_000,
-        trend="stalling", is_overstocked=True,
-    )
-    fillers = [_make_metrics(sku=f"Filler {i}", revenue_opportunity_monthly=80_000 - i) for i in range(2)]
-    all_metrics = [m, *fillers]
-    records = [_make_record(sku=x.sku, units_on_order=0) for x in all_metrics]
-    batch = apply_business_rules(records, all_metrics, _minimal_rules())
+    m = _make_metrics(sku="Tension No PO", trend="stalling", is_overstocked=True)
+    records = [_make_record(sku="Tension No PO", units_on_order=0)]
+    batch = apply_business_rules(records, [m], _minimal_rules())
 
     r = _rec(batch, "Tension No PO")
-    assert r.recommended_action is None
+    assert r.tension_flag == "high_revenue_declining_demand"  # flag still fires...
+    assert r.recommended_action is None                        # ...but nothing to defer
 
 
 # --- Prioritization: revenue at risk, not revenue in total -----------------

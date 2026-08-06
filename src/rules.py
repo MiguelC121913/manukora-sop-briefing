@@ -30,6 +30,21 @@ Design decisions worth being explicit about:
   of the automated recommendation surface pending human review. This is a
   judgment call rather than something the brief mandates numerically;
   documented here and in the README.
+
+- **Tension flag criterion, revised.** Originally gated to the top 3 SKUs
+  by `revenue_opportunity_monthly` (the initial spec's own choice). That
+  threshold proved too narrow in practice: it excluded MGO 100+ 250g, the
+  dataset's clearest tension case (overstocked, stalling demand, and a PO
+  still in transit) — the SKU ranks #7 by revenue, not top-3. The
+  criterion is now: `is_overstocked` AND a declining-demand signal
+  (`trend == "stalling"` OR either channel's MoM is negative) — no revenue
+  ranking at all. Overstock is the real gate: capital tied up in excess
+  inventory *combined with* a stalling/declining signal is the tension,
+  independent of how large the SKU's revenue line is. The `tension_flag`
+  value string (`"high_revenue_declining_demand"`) is left as-is for
+  continuity with the original spec even though revenue is no longer the
+  gating condition — see `prompts/ITERATION_LOG.md`'s v2→v3 note for the
+  full before/after.
 """
 
 from __future__ import annotations
@@ -105,20 +120,20 @@ def _apply_phase_out_suppression(
 
 
 def _compute_tension_flags(results: list[SKUMetrics]) -> dict[str, dict[str, Any]]:
-    """Top-3-by-revenue SKUs that are also showing a declining-demand signal
-    (stalling trend, or either channel's MoM negative) get flagged. Applied
-    only to the top 3 by design — the rule is specifically about revenue at
-    risk of erosion at the top of the portfolio, not a general "any SKU
-    slowing down" check (metrics.trend already surfaces that on its own).
+    """Any SKU that is both overstocked and showing a declining-demand
+    signal (stalling trend, or either channel's MoM negative) gets flagged
+    — regardless of revenue rank. See the module docstring's "Tension flag
+    criterion, revised" note for why this replaced the original top-3-by-
+    revenue gate.
     """
-    top3 = sorted(results, key=lambda m: m.revenue_opportunity_monthly, reverse=True)[:3]
     flags: dict[str, dict[str, Any]] = {}
 
-    for m in top3:
+    for m in results:
         channel_negative = (m.shopify_mom_growth is not None and m.shopify_mom_growth < 0) or (
             m.amazon_mom_growth is not None and m.amazon_mom_growth < 0
         )
-        if m.trend == "stalling" or channel_negative:
+        declining_signal = m.trend == "stalling" or channel_negative
+        if declining_signal and m.is_overstocked:
             flags[m.sku] = {
                 "tension_flag": "high_revenue_declining_demand",
                 "supporting_figures": {
@@ -127,6 +142,7 @@ def _compute_tension_flags(results: list[SKUMetrics]) -> dict[str, dict[str, Any
                     "mom_growth": m.mom_growth,
                     "shopify_mom_growth": m.shopify_mom_growth,
                     "amazon_mom_growth": m.amazon_mom_growth,
+                    "is_overstocked": m.is_overstocked,
                 },
             }
 
@@ -199,15 +215,15 @@ def apply_business_rules(
 
         if tension_flag:
             notes.append(
-                f"{m.sku} is a top-3 revenue SKU (${m.revenue_opportunity_monthly:,.0f}/mo) "
-                f"showing a declining-demand signal (trend={m.trend}, "
+                f"{m.sku} is overstocked (${m.revenue_opportunity_monthly:,.0f}/mo revenue "
+                f"opportunity) and showing a declining-demand signal (trend={m.trend}, "
                 f"Shopify MoM={_fmt_pct(m.shopify_mom_growth)}, "
                 f"Amazon MoM={_fmt_pct(m.amazon_mom_growth)}). Held out of the automated "
                 f"reorder recommendation pending review, even though metrics.py computed "
                 f"a raw reorder_quantity of {m.reorder_quantity} units."
             )
             warnings.append(
-                f"Tension flag: {m.sku} — high revenue opportunity but declining demand signal. "
+                f"Tension flag: {m.sku} — overstocked with a declining demand signal. "
                 f"Not auto-recommended for reorder."
             )
             if m.is_overstocked and record.units_on_order > 0:
