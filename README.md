@@ -115,6 +115,16 @@ Optional — regenerate the naive baseline experiment from Phase 5 (real API cal
 python -m src.main --naive       # writes output/history/v1_naive_output.md
 ```
 
+This pipeline also runs on a schedule via GitHub Actions
+([`.github/workflows/monthly-sop.yml`](.github/workflows/monthly-sop.yml)) — the 1st of every
+month, plus on demand from the Actions tab. It installs dependencies, runs the full test suite
+first (so a briefing is never generated on top of unverified math), then calls `--generate` using
+an `ANTHROPIC_API_KEY` repository secret, and uploads the briefing and facts payload as workflow
+artifacts.
+
+![GitHub Actions workflow passing](docs/screenshots/github-action-success.jpg)
+*Scheduled pipeline running successfully in CI.*
+
 ## Assumptions
 
 Every number in this pipeline is either computed from `data/mock_sales.csv` or governed by a
@@ -276,6 +286,9 @@ Run everything:
 pytest -v                     # all 67 tests
 python -m src.main --generate  # real pipeline + real validation, end to end
 ```
+
+![Test suite passing](docs/screenshots/pytest-passing.jpg)
+*67/67 tests passing, run from a clean environment.*
 
 ## Tradeoffs and what I would do next with real data
 
