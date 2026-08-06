@@ -3,7 +3,9 @@
     --naive             Run the "naive" baseline experiment: send the raw
                          sales CSV directly to Claude with a simple prompt,
                          no deterministic engine involved. Saves the verbatim
-                         response to output/v1_naive_output.md. See
+                         response to output/history/v1_naive_output.md (kept
+                         out of output/'s root so that folder never contains
+                         anything but the current deliverable). See
                          prompts/v1_initial.md and prompts/ITERATION_LOG.md.
 
     --generate           Run the real pipeline: loader -> metrics -> rules ->
@@ -39,7 +41,7 @@ def _extract_user_message(template: str) -> str:
 
 def run_naive_baseline() -> None:
     """Send the raw CSV to Claude with prompts/v1_initial.md's naive prompt
-    and save the response to output/v1_naive_output.md byte-for-byte.
+    and save the response to output/history/v1_naive_output.md byte-for-byte.
 
     This is a deliberate anti-pattern kept in the repo for comparison: no
     deterministic math, no business rules, no facts payload. The output is
@@ -84,7 +86,7 @@ def run_naive_baseline() -> None:
     )
     output_text = next(b.text for b in response.content if b.type == "text")
 
-    output_path = REPO_ROOT / "output" / "v1_naive_output.md"
+    output_path = REPO_ROOT / "output" / "history" / "v1_naive_output.md"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(output_text, encoding="utf-8")
     print(
@@ -162,7 +164,7 @@ def main() -> None:
         "--naive",
         action="store_true",
         help="Run the naive baseline experiment (raw CSV straight to Claude, no engine). "
-        "Saves output/v1_naive_output.md.",
+        "Saves output/history/v1_naive_output.md.",
     )
     parser.add_argument(
         "--generate",
