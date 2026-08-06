@@ -1,0 +1,28 @@
+period:
+  m1_label: "December 2025"
+  m4_label: "March 2026"
+  current_month: "2026-03"
+
+defaults:
+  supplier_lead_time_months: 2
+  target_months_cover: 2
+  max_monthly_growth_rate: 0.12
+  order_rounding_units: 100
+  projection_horizon_months: 12
+
+sku_overrides:
+  "Manuka Honey MGO 1700+ 100g":
+    supplier_lead_time_months: 3
+    target_months_cover: 3
+    rationale: "Premium price point and longer supplier lead times."
+
+  "Propolis Tincture 30ml":
+    phase_out_quarter: "2026-Q2"
+    reorder_only_if_cover_days_below: 30
+    rationale: "Being phased out in Q2 2026. Flag stockout risk, but suppress reorder unless cover drops below 30 days."
+
+  "Bioactive Blend Immunity 250g": &bioactive
+    trend_baseline_month: 2
+    rationale: "Launched mid-January 2026 (M2). M1 is not a valid trend baseline."
+  "Bioactive Blend Energy 250g": *bioactive
+  "Bioactive Blend Recovery 250g": *bioactive
