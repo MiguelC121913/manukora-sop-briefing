@@ -1,0 +1,53 @@
+name: Monthly S&OP Briefing
+
+# Runs on the 1st of every month, and on demand from the Actions tab.
+# Cron times are always UTC — 00:00 UTC on day-of-month 1.
+on:
+  schedule:
+    - cron: "0 0 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  generate-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Fail the run here, before ever touching the API, if the deterministic
+      # engine's golden-value tests don't pass — never generate a briefing on
+      # top of math that isn't verified.
+      - name: Run test suite
+        run: pytest -v
+
+      # ANTHROPIC_API_KEY must be configured as a repository secret
+      # (Settings -> Secrets and variables -> Actions) before this step can
+      # succeed — see README.md's Setup and run section for what the key
+      # needs and where to get it. Nothing here reads or writes a real key;
+      # GitHub injects it into the environment only for this job run.
+      - name: Generate S&OP briefing
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python -m src.main --generate
+
+      - name: Upload briefing artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sop-briefing-${{ github.run_id }}
+          path: |
+            output/sop_briefing_*.md
+            output/facts_payload_*.json
+          if-no-files-found: warn
+          retention-days: 90
