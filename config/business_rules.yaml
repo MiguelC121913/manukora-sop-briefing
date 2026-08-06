@@ -9,6 +9,13 @@ defaults:
   max_monthly_growth_rate: 0.12
   order_rounding_units: 100
   projection_horizon_months: 12
+  # Narrative-facing "Stock at Risk" cutoff (src/narrative.py build_facts_payload):
+  # a SKU only belongs on that list if its projected stockout falls within this
+  # many months AND it isn't overstocked. 4 months covers the longest supplier
+  # lead time in this dataset (3 months, MGO 1700+ 100g) with a one-month margin
+  # — anything stocking out further out than that isn't an urgent decision today,
+  # and anything overstocked isn't "at risk" regardless of its stockout month.
+  stock_at_risk_horizon_months: 4
 
 sku_overrides:
   "Manuka Honey MGO 1700+ 100g":

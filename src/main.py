@@ -1,15 +1,18 @@
 """CLI entry point for the Manukora S&OP briefing pipeline.
 
-Currently supports:
-    --naive   Run the "naive" baseline experiment: send the raw sales CSV
-              directly to Claude with a simple prompt and no deterministic
-              engine involved. Saves the verbatim response to
-              output/v1_naive_output.md. See prompts/v1_initial.md and
-              prompts/ITERATION_LOG.md for what this is testing and why.
+    --naive             Run the "naive" baseline experiment: send the raw
+                         sales CSV directly to Claude with a simple prompt,
+                         no deterministic engine involved. Saves the verbatim
+                         response to output/v1_naive_output.md. See
+                         prompts/v1_initial.md and prompts/ITERATION_LOG.md.
 
-The full pipeline (deterministic engine -> facts payload -> narrative,
-via loader.py / metrics.py / rules.py / narrative.py) is wired up in a
-later phase.
+    --generate           Run the real pipeline: loader -> metrics -> rules ->
+                         facts payload -> Claude (v2 prompt) -> validated
+                         narrative. Writes output/facts_payload_<month>.json
+                         and output/sop_briefing_<month>.md.
+
+    --month YYYY-MM      Month label used in output filenames for --generate
+                         (default: 2026-03, matching the mock data).
 """
 
 from __future__ import annotations
@@ -90,6 +93,69 @@ def run_naive_baseline() -> None:
     )
 
 
+def run_pipeline(month_label: str = "2026-03") -> None:
+    """The real pipeline: deterministic engine all the way to a validated,
+    facts-grounded narrative. No step here computes a business number except
+    metrics.py/rules.py, which already ran before narrative.py is touched.
+    """
+    from src.loader import load_business_rules, load_sales_data
+    from src.metrics import compute_all_metrics
+    from src.narrative import (
+        NARRATIVE_MODEL,
+        NarrativeValidationError,
+        assert_narrative_numbers_verified,
+        build_facts_payload,
+        generate_narrative,
+        save_narrative,
+        write_facts_payload,
+    )
+    from src.rules import apply_business_rules
+
+    business_rules = load_business_rules(REPO_ROOT / "config" / "business_rules.yaml")
+    load_result = load_sales_data(REPO_ROOT / "data" / "mock_sales.csv", business_rules=business_rules)
+    for w in load_result.data_quality_warnings:
+        print(f"[data quality] {w}")
+
+    metrics_batch = compute_all_metrics(load_result.records, business_rules)
+    for w in metrics_batch.warnings:
+        print(f"[metrics] {w}")
+
+    rules_batch = apply_business_rules(load_result.records, metrics_batch.results, business_rules)
+    for w in rules_batch.warnings:
+        print(f"[rules] {w}")
+
+    payload = build_facts_payload(
+        load_result.records,
+        metrics_batch.results,
+        rules_batch,
+        business_rules,
+        load_result.data_quality_warnings,
+        metrics_batch.warnings,
+    )
+    payload_path = REPO_ROOT / "output" / f"facts_payload_{month_label}.json"
+    write_facts_payload(payload, payload_path)
+    print(f"Wrote facts payload to {payload_path.relative_to(REPO_ROOT)}")
+
+    print(f"Calling Claude ({NARRATIVE_MODEL}) with the v2 prompt + facts payload...")
+    narrative, stop_reason = generate_narrative(payload)
+    print(f"Received narrative ({len(narrative)} chars, stop_reason={stop_reason}). Validating numbers...")
+
+    try:
+        assert_narrative_numbers_verified(narrative, payload)
+    except NarrativeValidationError as exc:
+        unverified_path = REPO_ROOT / "output" / f"sop_briefing_{month_label}_UNVERIFIED.md"
+        save_narrative(narrative, unverified_path)
+        print(f"Saved UNVERIFIED narrative to {unverified_path.relative_to(REPO_ROOT)} for inspection.")
+        raise SystemExit(f"Narrative validation FAILED:\n{exc}") from exc
+
+    narrative_path = REPO_ROOT / "output" / f"sop_briefing_{month_label}.md"
+    save_narrative(narrative, narrative_path)
+    print(
+        f"All figures verified against the facts payload. "
+        f"Saved briefing to {narrative_path.relative_to(REPO_ROOT)}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Manukora S&OP briefing pipeline")
     parser.add_argument(
@@ -98,10 +164,23 @@ def main() -> None:
         help="Run the naive baseline experiment (raw CSV straight to Claude, no engine). "
         "Saves output/v1_naive_output.md.",
     )
+    parser.add_argument(
+        "--generate",
+        action="store_true",
+        help="Run the full deterministic pipeline and generate a validated narrative briefing.",
+    )
+    parser.add_argument(
+        "--month",
+        default="2026-03",
+        help="Month label for --generate output filenames (default: 2026-03).",
+    )
     args = parser.parse_args()
 
     if args.naive:
         run_naive_baseline()
+        return
+    if args.generate:
+        run_pipeline(args.month)
         return
 
     parser.print_help()
